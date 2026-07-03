@@ -1,0 +1,59 @@
+name: Build installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\windows\build_windows_installer.ps1
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIPhotoSorterSetup-0.2.2-windows
+          path: release/AIPhotoSorterSetup-0.2.2.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS installers
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build installers
+        run: sh installer/macos/build_macos_installer.sh
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIPhotoSorter-0.2.2-macos
+          path: |
+            release/AIPhotoSorter.pkg
+            release/AIPhotoSorterInstaller.dmg
+          if-no-files-found: error

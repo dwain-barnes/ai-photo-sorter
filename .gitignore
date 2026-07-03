@@ -1,0 +1,39 @@
+# Python environments and caches
+.venv/
+.build-venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Build and packaged installer output
+build/
+dist/
+release/
+*.egg-info/
+*.exe
+*.msi
+*.dmg
+*.pkg
+*.zip
+
+# Local config, logs, and generated data
+.env
+.env.*
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Local AI runtimes and model weights
+models/
+runtime/
+llama.cpp/
+*.gguf
+*.safetensors
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

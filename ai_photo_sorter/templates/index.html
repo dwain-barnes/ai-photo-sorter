@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI Photo Sorter</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span><span></span>
+        </div>
+        <div>
+          <h1>AI Photo Sorter</h1>
+          <p>{{ database_path }}</p>
+        </div>
+      </div>
+      <nav class="tabs" aria-label="Sections">
+        <button class="tab active" type="button" data-section="organize">Organize</button>
+        <button class="tab" type="button" data-section="search">Search</button>
+      </nav>
+    </header>
+
+    <main>
+      <section id="organize" class="section active">
+        <div class="organize-layout">
+          <aside class="panel setup-panel">
+            <div class="panel-title">
+              <h2>Scan Images</h2>
+            </div>
+
+            <label class="field">
+              <span>Input folder</span>
+              <div class="path-row">
+                <input id="inputFolder" type="text" placeholder="Choose a folder">
+                <button class="secondary" type="button" data-pick="inputFolder">Browse</button>
+              </div>
+            </label>
+
+            <label class="field">
+              <span>Output folder</span>
+              <div class="path-row">
+                <input id="outputFolder" type="text" placeholder="Choose a folder">
+                <button class="secondary" type="button" data-pick="outputFolder">Browse</button>
+              </div>
+            </label>
+
+            <div class="settings-grid single">
+              <label class="field">
+                <span>File mode</span>
+                <select id="fileMode">
+                  <option value="copy" selected>Copy</option>
+                  <option value="move">Move</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="scan-actions">
+              <button id="scanImages" class="primary" type="button">Scan Images</button>
+              <button id="cancelScan" class="secondary hidden" type="button">Cancel Scan</button>
+            </div>
+          </aside>
+
+          <div class="work-area">
+            <div class="panel progress-panel">
+              <div>
+                <h2>Review</h2>
+                <p id="scanMessage">No scan yet</p>
+              </div>
+              <div class="progress-wrap" aria-label="Scan progress">
+                <div id="progressBar" class="progress-bar"></div>
+              </div>
+            </div>
+
+            <div class="toolbar">
+              <button id="approveHigh" class="secondary" type="button">Approve High Confidence</button>
+              <button id="sendLowReview" class="secondary" type="button">Low Confidence to Review</button>
+              <button id="applyChanges" class="primary" type="button" disabled>Apply Changes</button>
+            </div>
+
+            <div class="table-shell">
+              <table class="review-table">
+                <thead>
+                  <tr>
+                    <th>Approve</th>
+                    <th>Image</th>
+                    <th>Current name</th>
+                    <th>New name</th>
+                    <th>Folder</th>
+                    <th>Caption</th>
+                    <th>Tags</th>
+                    <th>Confidence</th>
+                  </tr>
+                </thead>
+                <tbody id="reviewBody">
+                  <tr class="empty-row">
+                    <td colspan="8">Choose folders and scan.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="search" class="section">
+        <div class="search-layout">
+          <div class="search-strip">
+            <input id="searchQuery" type="search" placeholder="Search images naturally">
+            <select id="searchCategory">
+              <option value="">All categories</option>
+              {% for category in categories %}
+              <option value="{{ category }}">{{ category }}</option>
+              {% endfor %}
+            </select>
+            <label class="inline-check"><input id="searchNeedsReview" type="checkbox"> Needs Review</label>
+            <button id="runSearch" class="primary" type="button">Search</button>
+          </div>
+          <p id="interpretedQuery" class="interpreted"></p>
+          <div id="searchResults" class="results-grid"></div>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

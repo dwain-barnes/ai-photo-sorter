@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+
+RELEASE_TAG="b9860"
+MODEL_FILE="gemma-4-E4B-it-Q4_K_S.gguf"
+PROJECTOR_FILE="mmproj-F16.gguf"
+MODEL_URL="https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/$MODEL_FILE"
+PROJECTOR_URL="https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/$PROJECTOR_FILE"
+
+CONSOLE_USER="$(stat -f "%Su" /dev/console)"
+if [ "$CONSOLE_USER" = "root" ] || [ -z "$CONSOLE_USER" ]; then
+  exit 0
+fi
+
+USER_HOME="$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory | awk '{print $2}')"
+ARCH="$(uname -m)"
+if [ "$ARCH" = "arm64" ]; then
+  RUNTIME_ASSET="llama-$RELEASE_TAG-bin-macos-arm64.tar.gz"
+  ACCELERATION="Apple Metal"
+else
+  RUNTIME_ASSET="llama-$RELEASE_TAG-bin-macos-x64.tar.gz"
+  ACCELERATION="CPU"
+fi
+RUNTIME_URL="https://github.com/ggml-org/llama.cpp/releases/download/$RELEASE_TAG/$RUNTIME_ASSET"
+
+APP_HOME="$USER_HOME/.ai_photo_sorter"
+ROOT="$APP_HOME/llama_cpp"
+DOWNLOADS="$ROOT/downloads"
+RUNTIME_DIR="$ROOT/runtime"
+MODELS_DIR="$ROOT/models"
+LOG_PATH="$ROOT/installer_setup.log"
+
+mkdir -p "$DOWNLOADS" "$RUNTIME_DIR" "$MODELS_DIR"
+
+log() {
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG_PATH"
+}
+
+download_file() {
+  url="$1"
+  destination="$2"
+  label="$3"
+
+  if [ -f "$destination" ]; then
+    size="$(wc -c < "$destination")"
+    if [ "$size" -gt 10485760 ]; then
+      log "$label already exists."
+      return
+    fi
+  fi
+
+  log "Downloading $label. This can take a while."
+  rm -f "$destination.part"
+  curl -L --fail --progress-bar "$url" -o "$destination.part"
+  mv "$destination.part" "$destination"
+}
+
+find_server() {
+  find "$RUNTIME_DIR" -type f -name "llama-server" -print -quit
+}
+
+log "Preparing llama.cpp local AI for AI Photo Sorter."
+log "Selected runtime acceleration: $ACCELERATION"
+
+if [ -z "$(find_server)" ]; then
+  runtime_archive="$DOWNLOADS/$RUNTIME_ASSET"
+  download_file "$RUNTIME_URL" "$runtime_archive" "llama.cpp runtime"
+  log "Extracting llama.cpp runtime."
+  rm -rf "$RUNTIME_DIR"
+  mkdir -p "$RUNTIME_DIR"
+  tar -xzf "$runtime_archive" -C "$RUNTIME_DIR"
+fi
+
+server="$(find_server)"
+if [ -z "$server" ]; then
+  log "llama-server was not found after extraction."
+  chown -R "$CONSOLE_USER":staff "$APP_HOME" || true
+  exit 1
+fi
+chmod +x "$server"
+
+download_file "$MODEL_URL" "$MODELS_DIR/$MODEL_FILE" "$MODEL_FILE"
+download_file "$PROJECTOR_URL" "$MODELS_DIR/$PROJECTOR_FILE" "$PROJECTOR_FILE"
+
+chown -R "$CONSOLE_USER":staff "$APP_HOME" || true
+log "Local AI files are ready."
+
+exit 0
