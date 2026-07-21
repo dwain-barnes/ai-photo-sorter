@@ -38,6 +38,8 @@ class ScanJob:
 
 
 class JobStore:
+    MAX_JOBS = 20
+
     def __init__(self) -> None:
         self._jobs: dict[str, ScanJob] = {}
         self._lock = threading.Lock()
@@ -45,6 +47,18 @@ class JobStore:
     def create(self) -> ScanJob:
         job = ScanJob(id=uuid.uuid4().hex)
         with self._lock:
+            while len(self._jobs) >= self.MAX_JOBS:
+                stale = next(
+                    (
+                        job_id
+                        for job_id, item in self._jobs.items()
+                        if item.status in {"done", "error", "cancelled"}
+                    ),
+                    None,
+                )
+                if stale is None:
+                    break
+                del self._jobs[stale]
             self._jobs[job.id] = job
         return job
 
@@ -158,9 +172,10 @@ def create_app() -> Flask:
     @app.post("/api/apply")
     def apply_changes():
         payload = request.get_json(force=True)
-        output_folder = Path(str(payload.get("output_folder") or "")).expanduser()
-        if not output_folder:
+        raw_output = str(payload.get("output_folder") or "").strip()
+        if not raw_output:
             return jsonify({"ok": False, "error": "Choose an output folder first."}), 400
+        output_folder = Path(raw_output).expanduser()
         mode = "move" if payload.get("mode") == "move" else "copy"
         rows = payload.get("rows") or []
         result = organizer.apply_changes(rows, output_folder=output_folder, mode=mode)
@@ -275,12 +290,16 @@ def run_local_ai_setup_job(job_id: str) -> None:
 
 
 def scan_options_from_payload(payload: dict[str, Any]) -> ScanOptions:
-    input_folder = Path(str(payload.get("input_folder") or "")).expanduser()
-    output_folder = Path(str(payload.get("output_folder") or "")).expanduser()
+    raw_input = str(payload.get("input_folder") or "").strip()
+    raw_output = str(payload.get("output_folder") or "").strip()
+    if not raw_input:
+        raise ValueError("Choose a valid input folder.")
+    if not raw_output:
+        raise ValueError("Choose a valid output folder.")
+    input_folder = Path(raw_input).expanduser()
+    output_folder = Path(raw_output).expanduser()
     if not input_folder.exists() or not input_folder.is_dir():
         raise ValueError("Choose a valid input folder.")
-    if not output_folder:
-        raise ValueError("Choose a valid output folder.")
     return ScanOptions(
         input_folder=input_folder,
         output_folder=output_folder,

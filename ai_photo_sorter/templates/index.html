@@ -4,38 +4,47 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>AI Photo Sorter</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2316140f'/%3E%3Cg fill='none' stroke='%23e8a13c' stroke-width='1.6' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M14.31 8l5.74 9.94M9.69 8h11.48M7.38 12l5.74-9.94M9.69 16L3.95 6.06M14.31 16H2.83M16.62 12l-5.74 9.94'/%3E%3C/g%3E%3C/svg%3E">
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
     <script defer src="{{ url_for('static', filename='app.js') }}"></script>
   </head>
   <body>
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true">
-          <span></span><span></span><span></span><span></span>
-        </div>
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+          <g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M14.31 8l5.74 9.94M9.69 8h11.48M7.38 12l5.74-9.94M9.69 16L3.95 6.06M14.31 16H2.83M16.62 12l-5.74 9.94"/>
+          </g>
+        </svg>
         <div>
           <h1>AI Photo Sorter</h1>
-          <p>{{ database_path }}</p>
+          <p>Sorted on your machine. Nothing leaves it.</p>
         </div>
       </div>
-      <nav class="tabs" aria-label="Sections">
-        <button class="tab active" type="button" data-section="organize">Organize</button>
-        <button class="tab" type="button" data-section="search">Search</button>
-      </nav>
+      <div class="topbar-side">
+        <div id="aiChip" class="ai-chip checking">
+          <span class="ai-dot" aria-hidden="true"></span>
+          <span id="aiChipText">Checking local AI&hellip;</span>
+          <button id="setupAi" class="chip-action hidden" type="button">Set up local AI</button>
+        </div>
+        <nav class="tabs" aria-label="Sections">
+          <button class="tab active" type="button" data-section="organize">Organize</button>
+          <button class="tab" type="button" data-section="search">Search</button>
+        </nav>
+      </div>
     </header>
 
     <main>
       <section id="organize" class="section active">
         <div class="organize-layout">
           <aside class="panel setup-panel">
-            <div class="panel-title">
-              <h2>Scan Images</h2>
-            </div>
+            <h2>Scan</h2>
 
             <label class="field">
               <span>Input folder</span>
               <div class="path-row">
-                <input id="inputFolder" type="text" placeholder="Choose a folder">
+                <input id="inputFolder" type="text" placeholder="Folder with your photos" spellcheck="false">
                 <button class="secondary" type="button" data-pick="inputFolder">Browse</button>
               </div>
             </label>
@@ -43,19 +52,22 @@
             <label class="field">
               <span>Output folder</span>
               <div class="path-row">
-                <input id="outputFolder" type="text" placeholder="Choose a folder">
+                <input id="outputFolder" type="text" placeholder="Where sorted copies go" spellcheck="false">
                 <button class="secondary" type="button" data-pick="outputFolder">Browse</button>
               </div>
             </label>
 
-            <div class="settings-grid single">
-              <label class="field">
-                <span>File mode</span>
-                <select id="fileMode">
-                  <option value="copy" selected>Copy</option>
-                  <option value="move">Move</option>
-                </select>
-              </label>
+            <div class="field">
+              <span>File mode</span>
+              <div class="segmented" role="radiogroup" aria-label="File mode">
+                <label><input type="radio" name="fileModeChoice" value="copy" checked><span>Copy</span></label>
+                <label><input type="radio" name="fileModeChoice" value="move"><span>Move</span></label>
+              </div>
+              <small id="fileModeHint">Copy leaves your originals untouched.</small>
+              <select id="fileMode" class="hidden" aria-hidden="true" tabindex="-1">
+                <option value="copy" selected>Copy</option>
+                <option value="move">Move</option>
+              </select>
             </div>
 
             <div class="scan-actions">
@@ -66,12 +78,15 @@
 
           <div class="work-area">
             <div class="panel progress-panel">
-              <div>
+              <div class="progress-copy">
                 <h2>Review</h2>
                 <p id="scanMessage">No scan yet</p>
               </div>
-              <div class="progress-wrap" aria-label="Scan progress">
-                <div id="progressBar" class="progress-bar"></div>
+              <div class="progress-side">
+                <p id="reviewStats" class="review-stats"></p>
+                <div class="progress-wrap" aria-label="Scan progress">
+                  <div id="progressBar" class="progress-bar"></div>
+                </div>
               </div>
             </div>
 
@@ -97,7 +112,12 @@
                 </thead>
                 <tbody id="reviewBody">
                   <tr class="empty-row">
-                    <td colspan="8">Choose folders and scan.</td>
+                    <td colspan="8">
+                      <div class="empty-state">
+                        <strong>Nothing to review yet</strong>
+                        <span>Pick an input and output folder, then scan. Suggestions land here for you to check before anything is written.</span>
+                      </div>
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -109,7 +129,7 @@
       <section id="search" class="section">
         <div class="search-layout">
           <div class="search-strip">
-            <input id="searchQuery" type="search" placeholder="Search images naturally">
+            <input id="searchQuery" type="search" placeholder="Try &ldquo;dog on the beach&rdquo; or &ldquo;receipts&rdquo;" spellcheck="false">
             <select id="searchCategory">
               <option value="">All categories</option>
               {% for category in categories %}
@@ -120,10 +140,20 @@
             <button id="runSearch" class="primary" type="button">Search</button>
           </div>
           <p id="interpretedQuery" class="interpreted"></p>
-          <div id="searchResults" class="results-grid"></div>
+          <div id="searchResults" class="results-grid">
+            <div class="empty-state wide">
+              <strong>Search your library</strong>
+              <span>Every scanned photo is indexed by caption, tags, and visible text. Ask in plain English.</span>
+            </div>
+          </div>
         </div>
       </section>
     </main>
+
+    <footer class="footer">
+      <span>Library</span>
+      <code>{{ database_path }}</code>
+    </footer>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </body>

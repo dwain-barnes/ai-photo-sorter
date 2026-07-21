@@ -37,3 +37,4 @@ llama.cpp/
 Thumbs.db
 .vscode/
 .idea/
+.claude/

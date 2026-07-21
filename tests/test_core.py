@@ -7,7 +7,7 @@ from pathlib import Path
 from PIL import Image
 
 from ai_photo_sorter.ai_client import AIClient, normalize_search_intent
-from ai_photo_sorter.app import JobStore, create_app
+from ai_photo_sorter.app import JobStore, create_app, scan_options_from_payload
 from ai_photo_sorter.config import AppSettings, LLAMA_BASE_URL, LLAMA_MODEL_FILE
 from ai_photo_sorter.database import ImageDatabase
 from ai_photo_sorter.image_tools import infer_folder_from_filename
@@ -84,6 +84,22 @@ class FilenameRulesTest(unittest.TestCase):
         self.assertTrue(store.cancel(job.id))
         self.assertTrue(store.is_cancelled(job.id))
         self.assertEqual(store.get(job.id).status, "cancelling")
+
+    def test_scan_rejects_missing_output_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "output folder"):
+                scan_options_from_payload({"input_folder": tmp, "output_folder": ""})
+
+    def test_job_store_drops_old_finished_jobs(self) -> None:
+        store = JobStore()
+        first = store.create()
+        store.update(first.id, status="done")
+        for _ in range(JobStore.MAX_JOBS):
+            job = store.create()
+            store.update(job.id, status="done")
+
+        self.assertIsNone(store.get(first.id))
+        self.assertIsNotNone(store.get(job.id))
 
     def test_app_settings_lock_to_llama_cpp_gemma4_e4b_gguf(self) -> None:
         settings = AppSettings(base_url="http://example.invalid/v1", model="something-else")
@@ -446,6 +462,32 @@ class OfflineScanTest(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["suggested_folder"], "townhall")
             self.assertFalse(rows[0].get("last_error"))
+
+    def test_scan_skips_output_folder_nested_inside_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = Path(tmp)
+            output_dir = input_dir / "Sorted"
+            (output_dir / "townhall").mkdir(parents=True)
+            Image.new("RGB", (80, 60), (120, 90, 50)).save(input_dir / "Tamworth_townhall_01.jpg")
+            Image.new("RGB", (80, 60), (120, 90, 50)).save(
+                output_dir / "townhall" / "already_sorted_copy.jpg"
+            )
+
+            organizer = ImageOrganizer(
+                database=ImageDatabase(input_dir / "library.db"),
+                ai_client=OfflineAIClient(),
+            )
+            rows = organizer.scan(
+                ScanOptions(
+                    input_folder=input_dir,
+                    output_folder=output_dir,
+                    allow_filename_only_fallback=True,
+                    settings=AppSettings(),
+                )
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["original_filename"], "Tamworth_townhall_01.jpg")
 
     def test_apply_copies_to_suggested_folder_and_keeps_original(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

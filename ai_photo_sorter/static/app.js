@@ -1,7 +1,9 @@
 const state = {
   reviewRows: [],
   pollTimer: null,
+  pollMisses: 0,
   activeScanJobId: null,
+  setupJobId: null,
 };
 
 const DEFAULT_CONFIDENCE_THRESHOLD = 0.75;
@@ -13,6 +15,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindTabs();
   bindControls();
   refreshCategories();
+  refreshAiStatus();
 });
 
 function bindTabs() {
@@ -35,11 +38,21 @@ function bindControls() {
     });
   });
 
+  $$("input[name='fileModeChoice']").forEach((radio) => {
+    radio.addEventListener("change", () => {
+      $("#fileMode").value = radio.value;
+      $("#fileModeHint").textContent = radio.value === "move"
+        ? "Move puts the originals in the output folder."
+        : "Copy leaves your originals untouched.";
+    });
+  });
+
   $("#scanImages").addEventListener("click", startScan);
   $("#cancelScan").addEventListener("click", cancelScan);
   $("#approveHigh").addEventListener("click", approveHighConfidence);
   $("#sendLowReview").addEventListener("click", sendLowConfidenceToReview);
   $("#applyChanges").addEventListener("click", applyChanges);
+  $("#setupAi").addEventListener("click", setUpLocalAi);
   $("#runSearch").addEventListener("click", runSearch);
   $("#searchQuery").addEventListener("keydown", (event) => {
     if (event.key === "Enter") runSearch();
@@ -62,6 +75,75 @@ function collectSettings() {
   };
 }
 
+/* Local AI status */
+
+function setAiChip(kind, text, showSetup) {
+  const chip = $("#aiChip");
+  chip.classList.remove("checking", "ready", "missing", "working");
+  chip.classList.add(kind);
+  $("#aiChipText").textContent = text;
+  $("#setupAi").classList.toggle("hidden", !showSetup);
+}
+
+async function refreshAiStatus() {
+  if (state.setupJobId) return;
+  try {
+    const status = await postJson("/api/test-ai", {});
+    if (status.ok) {
+      setAiChip("ready", "Local AI ready", false);
+    } else {
+      setAiChip("missing", "Local AI not set up", true);
+    }
+  } catch {
+    setAiChip("missing", "Local AI not set up", true);
+  }
+}
+
+async function setUpLocalAi() {
+  if (state.setupJobId) return;
+  setBusy("#setupAi", true);
+  try {
+    const response = await postJson("/api/prepare-local-ai", {});
+    state.setupJobId = response.job_id;
+    setAiChip("working", "Preparing local AI…", false);
+    pollSetupJob(response.job_id);
+  } catch (error) {
+    setBusy("#setupAi", false);
+    showToast(error.message);
+  }
+}
+
+function pollSetupJob(jobId) {
+  setTimeout(async () => {
+    let job;
+    try {
+      const response = await fetch(`/api/jobs/${jobId}`);
+      job = await response.json();
+    } catch {
+      pollSetupJob(jobId);
+      return;
+    }
+    if (job.status === "done") {
+      state.setupJobId = null;
+      setBusy("#setupAi", false);
+      showToast("Local AI is ready.");
+      refreshAiStatus();
+      return;
+    }
+    if (job.status === "error" || !job.ok) {
+      state.setupJobId = null;
+      setBusy("#setupAi", false);
+      setAiChip("missing", "Local AI setup failed", true);
+      showToast(job.error || "Local AI setup failed.");
+      return;
+    }
+    setAiChip("working", job.message || "Preparing local AI…", false);
+    pollSetupJob(jobId);
+  }, 900);
+}
+
+/* Scanning */
+
 async function startScan() {
   if (state.activeScanJobId) return;
 
@@ -80,6 +162,7 @@ async function startScan() {
     const response = await postJson("/api/scan", settings);
     if (!response.ok) throw new Error(response.error || "Scan could not start.");
     state.activeScanJobId = response.job_id;
+    state.pollMisses = 0;
     pollJob(response.job_id);
   } catch (error) {
     state.activeScanJobId = null;
@@ -92,7 +175,7 @@ async function startScan() {
 async function cancelScan() {
   if (!state.activeScanJobId) return;
   setBusy("#cancelScan", true);
-  setProgress(currentProgressPercent(), "Stopping scan...");
+  setProgress(currentProgressPercent(), "Stopping scan…");
   try {
     const response = await postJson(`/api/jobs/${state.activeScanJobId}/cancel`, {});
     if (!response.ok) throw new Error(response.error || "Scan could not be cancelled.");
@@ -105,9 +188,26 @@ async function cancelScan() {
 function pollJob(jobId) {
   clearTimeout(state.pollTimer);
   state.pollTimer = setTimeout(async () => {
+    let job;
     try {
       const response = await fetch(`/api/jobs/${jobId}`);
-      const job = await response.json();
+      job = await response.json();
+      state.pollMisses = 0;
+    } catch {
+      // The backend keeps scanning even if one poll drops, so only give up
+      // after several misses in a row.
+      state.pollMisses += 1;
+      if (state.pollMisses < 5) {
+        pollJob(jobId);
+      } else {
+        state.activeScanJobId = null;
+        setScanRunning(false);
+        showToast("Lost contact with the app. Is it still running?");
+      }
+      return;
+    }
+
+    try {
       if (!job.ok) throw new Error(job.error || "Scan job not found.");
       const percent = job.total ? (job.done / job.total) * 100 : 0;
       setProgress(percent, job.message || "Scanning");
@@ -156,37 +256,61 @@ function currentProgressPercent() {
   return Number($("#progressBar").style.width.replace("%", "") || 0);
 }
 
+/* Review table */
+
 function renderReview(rows) {
   const body = $("#reviewBody");
   body.textContent = "";
+  updateReviewStats(rows);
   if (!rows.length) {
     const row = document.createElement("tr");
     row.className = "empty-row";
-    row.innerHTML = `<td colspan="8">Choose folders and scan.</td>`;
+    row.innerHTML = `
+      <td colspan="8">
+        <div class="empty-state">
+          <strong>Nothing to review yet</strong>
+          <span>Pick an input and output folder, then scan. Suggestions land here for you to check before anything is written.</span>
+        </div>
+      </td>`;
     body.appendChild(row);
     return;
   }
 
   rows.forEach((item, index) => {
+    const percent = Math.round(Number(item.confidence || 0) * 100);
+    const low = item.needs_review || Number(item.confidence || 0) < DEFAULT_CONFIDENCE_THRESHOLD;
     const row = document.createElement("tr");
+    row.className = "review-row";
     row.dataset.index = String(index);
+    row.style.animationDelay = `${Math.min(index * 25, 500)}ms`;
     row.innerHTML = `
       <td><input class="approve-input" type="checkbox" ${item.approved ? "checked" : ""}></td>
-      <td><img class="thumb" src="${item.thumbnail_url}" alt=""></td>
+      <td><img class="thumb" src="${item.thumbnail_url}" alt="" loading="lazy"></td>
       <td class="filename-cell">${escapeHtml(item.original_filename || "")}</td>
       <td><input class="new-name-input" type="text" value="${escapeAttr(item.new_filename || "")}"></td>
       <td><input class="folder-input" type="text" value="${escapeAttr(item.suggested_folder || "")}"></td>
       <td><input class="caption-input" type="text" value="${escapeAttr(item.caption || "")}"></td>
       <td><input class="tags-input" type="text" value="${escapeAttr((item.tags || []).join(", "))}"></td>
       <td>
-        <div class="confidence">
-          <meter min="0" max="1" value="${Number(item.confidence || 0)}"></meter>
-          <span>${Math.round(Number(item.confidence || 0) * 100)}%</span>
+        <div class="confidence ${low ? "low" : ""}">
+          <div class="conf-track"><div class="conf-fill" style="width:${percent}%"></div></div>
+          <span>${percent}%</span>
         </div>
       </td>
     `;
     body.appendChild(row);
   });
+}
+
+function updateReviewStats(rows) {
+  if (!rows.length) {
+    $("#reviewStats").textContent = "";
+    return;
+  }
+  const needsReview = rows.filter((row) => row.needs_review).length;
+  const parts = [`${rows.length} image${rows.length === 1 ? "" : "s"}`];
+  if (needsReview) parts.push(`${needsReview} need${needsReview === 1 ? "s" : ""} review`);
+  $("#reviewStats").textContent = parts.join(" · ");
 }
 
 function rowsFromReviewTable() {
@@ -204,7 +328,7 @@ function rowsFromReviewTable() {
 }
 
 function approveHighConfidence() {
-  const threshold = currentConfidenceThreshold();
+  const threshold = DEFAULT_CONFIDENCE_THRESHOLD;
   state.reviewRows = rowsFromReviewTable().map((row) => ({
     ...row,
     approved: Number(row.confidence || 0) >= threshold && !row.needs_review,
@@ -213,7 +337,7 @@ function approveHighConfidence() {
 }
 
 function sendLowConfidenceToReview() {
-  const threshold = currentConfidenceThreshold();
+  const threshold = DEFAULT_CONFIDENCE_THRESHOLD;
   state.reviewRows = rowsFromReviewTable().map((row) => {
     if (Number(row.confidence || 0) < threshold || row.needs_review) {
       return {
@@ -227,10 +351,6 @@ function sendLowConfidenceToReview() {
     return row;
   });
   renderReview(state.reviewRows);
-}
-
-function currentConfidenceThreshold() {
-  return DEFAULT_CONFIDENCE_THRESHOLD;
 }
 
 async function applyChanges() {
@@ -258,6 +378,8 @@ async function applyChanges() {
   }
 }
 
+/* Search */
+
 async function runSearch() {
   const query = $("#searchQuery").value.trim();
   if (!query && !$("#searchCategory").value && !$("#searchNeedsReview").checked) {
@@ -275,7 +397,7 @@ async function runSearch() {
     });
     if (!response.ok) throw new Error(response.error || "Search failed.");
     $("#interpretedQuery").textContent = response.interpreted_query
-      ? `Query: ${response.interpreted_query}`
+      ? `Searched for: ${response.interpreted_query}`
       : "";
     renderSearchResults(response.results || []);
   } catch (error) {
@@ -289,7 +411,11 @@ function renderSearchResults(results) {
   const shell = $("#searchResults");
   shell.textContent = "";
   if (!results.length) {
-    shell.innerHTML = `<div class="panel progress-panel"><p>No results</p></div>`;
+    shell.innerHTML = `
+      <div class="empty-state wide">
+        <strong>No matches</strong>
+        <span>Try fewer words, or clear the category filter.</span>
+      </div>`;
     return;
   }
 
@@ -298,12 +424,12 @@ function renderSearchResults(results) {
     card.className = "result-card";
     const path = item.current_path || item.original_path || "";
     card.innerHTML = `
-      <img class="thumb" src="${item.thumbnail_url}" alt="">
+      <img src="${item.thumbnail_url}" alt="" loading="lazy">
       <div>
         <h3>${escapeHtml(item.new_filename || item.original_filename || "")}</h3>
         <p>${escapeHtml(item.caption || "")}</p>
         <div class="tag-row">${(item.tags || []).slice(0, 6).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
-        <button class="link-button" type="button">Open Folder</button>
+        <button class="link-button" type="button">Open folder</button>
       </div>
     `;
     card.querySelector("button").addEventListener("click", () => {
@@ -326,6 +452,8 @@ async function refreshCategories() {
   } catch {
   }
 }
+
+/* Helpers */
 
 async function postJson(url, payload) {
   const response = await fetch(url, {

@@ -65,6 +65,7 @@ class ImageOrganizer:
         settings = options.settings or AppSettings()
         client = self.ai_client.with_settings(settings)
         files = scan_image_files(options.input_folder)
+        files = exclude_output_folder(files, options.input_folder, options.output_folder)
         if options.batch_limit and options.batch_limit > 0:
             files = files[: options.batch_limit]
 
@@ -281,6 +282,17 @@ class ImageOrganizer:
         row = self.database.get_image(image_id) or db_payload
         row["id"] = image_id
         return row
+
+
+def exclude_output_folder(files: list[Path], input_folder: Path, output_folder: Path) -> list[Path]:
+    try:
+        input_root = input_folder.resolve()
+        output_root = output_folder.resolve()
+    except OSError:
+        return files
+    if output_root == input_root or not output_root.is_relative_to(input_root):
+        return files
+    return [path for path in files if not path.resolve().is_relative_to(output_root)]
 
 
 def choose_suggested_folder(ai_result: dict[str, Any], organize_folders: bool) -> str:
