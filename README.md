@@ -2,6 +2,8 @@
 
 AI Photo Sorter helps non-technical users organize messy photo folders automatically using private, local AI. It scans images, suggests useful names, creates folders, writes tags to a searchable database, and lets users search their library in plain English.
 
+![AI Photo Sorter scanning a folder and suggesting names, folders and tags](demo.gif)
+
 ## Screenshots
 
 ![AI Photo Sorter main screen](AI_photo_Sorter.png)
