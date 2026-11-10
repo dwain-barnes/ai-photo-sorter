@@ -36,7 +36,16 @@ IMAGE_COLUMNS = [
     "needs_review",
     "thumbnail_path",
     "last_error",
+    "duplicate_of",
+    "duplicate_kind",
 ]
+
+# Columns added after the first release. initialize() adds any that an older
+# image_library.db is missing, so existing libraries keep working.
+MIGRATED_COLUMNS = {
+    "duplicate_of": "INTEGER",
+    "duplicate_kind": "TEXT",
+}
 
 SEARCH_STOP_WORDS = {
     "a",
@@ -121,10 +130,18 @@ class ImageDatabase:
                     confidence REAL,
                     needs_review INTEGER,
                     thumbnail_path TEXT,
-                    last_error TEXT
+                    last_error TEXT,
+                    duplicate_of INTEGER,
+                    duplicate_kind TEXT
                 )
                 """
             )
+            existing_columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(images)")
+            }
+            for column, column_type in MIGRATED_COLUMNS.items():
+                if column not in existing_columns:
+                    connection.execute(f"ALTER TABLE images ADD COLUMN {column} {column_type}")
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_images_original_path ON images(original_path)"
             )
@@ -206,6 +223,46 @@ class ImageDatabase:
                 (file_hash,),
             ).fetchone()
             return self._row_to_dict(row) if row else None
+
+    def find_duplicate_original(
+        self,
+        file_hash: str,
+        *,
+        exclude_paths: Iterable[str] = (),
+    ) -> dict[str, Any] | None:
+        """Return the oldest library image with this exact hash that still exists on disk.
+
+        Rows that are themselves duplicates are ignored so every duplicate points
+        at one original. ``exclude_paths`` lists files that are not candidates
+        (the file being checked, and the files of the current scan, whose order
+        decides which copy counts as the original).
+        """
+        excluded = {str(path) for path in exclude_paths}
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM images
+                WHERE file_hash = ? AND duplicate_of IS NULL
+                ORDER BY id
+                """,
+                (file_hash,),
+            ).fetchall()
+        for row in rows:
+            original_path = str(row["original_path"] or "")
+            current_path = str(row["current_path"] or "")
+            if original_path in excluded or (current_path and current_path in excluded):
+                continue
+            if any(path and Path(path).exists() for path in (current_path, original_path)):
+                return self._row_to_dict(row)
+        return None
+
+    def set_duplicate(self, image_id: int, duplicate_of: int | None, kind: str | None) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE images SET duplicate_of = ?, duplicate_kind = ? WHERE id = ?",
+                (duplicate_of, kind if duplicate_of is not None else None, image_id),
+            )
 
     def get_images(self, image_ids: list[int]) -> list[dict[str, Any]]:
         if not image_ids:

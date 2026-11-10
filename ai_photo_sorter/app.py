@@ -178,7 +178,12 @@ def create_app() -> Flask:
         output_folder = Path(raw_output).expanduser()
         mode = "move" if payload.get("mode") == "move" else "copy"
         rows = payload.get("rows") or []
-        result = organizer.apply_changes(rows, output_folder=output_folder, mode=mode)
+        result = organizer.apply_changes(
+            rows,
+            output_folder=output_folder,
+            mode=mode,
+            skip_duplicates=bool(payload.get("skip_duplicates", True)),
+        )
         return jsonify({"ok": True, **result})
 
     @app.post("/api/search")
@@ -311,6 +316,7 @@ def scan_options_from_payload(payload: dict[str, Any]) -> ScanOptions:
         custom_categories=str(payload.get("custom_categories") or ""),
         batch_limit=int(payload.get("batch_limit") or 0),
         allow_filename_only_fallback=bool(payload.get("allow_filename_only_fallback", False)),
+        skip_duplicates=bool(payload.get("skip_duplicates", True)),
         settings=settings_from_payload(payload),
     )
 
@@ -339,6 +345,11 @@ def row_for_api(row: dict[str, Any]) -> dict[str, Any]:
         "needs_review": bool(row.get("needs_review")),
         "thumbnail_url": f"/thumbnail/{row.get('id')}",
         "last_error": row.get("last_error") or "",
+        "duplicate_of": row.get("duplicate_of"),
+        "duplicate_kind": row.get("duplicate_kind") or "",
+        "duplicate_of_filename": row.get("duplicate_of_filename") or "",
+        "duplicate_of_path": row.get("duplicate_of_path") or "",
+        "skip_duplicates": bool(row.get("skip_duplicates", True)),
     }
 
 
