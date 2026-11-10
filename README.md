@@ -25,7 +25,7 @@ The Windows installer and macOS package installer put the app in the normal syst
 
 The model and projector are large, roughly 5.8 GB together, so first install can take a while. If setup is interrupted, run the installer again to retry the automatic local AI preparation.
 
-The app checks hardware automatically. NVIDIA systems use a CUDA llama.cpp build; Apple Silicon uses the macOS accelerated build; other systems fall back to CPU.
+The app checks hardware automatically. NVIDIA systems use the CUDA llama.cpp build on Windows and the Vulkan build on Linux (CPU if the Vulkan loader is missing); Apple Silicon uses the macOS accelerated build; other systems fall back to CPU.
 
 ## Build Installers
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import os
 import platform
 import shutil
@@ -272,12 +273,21 @@ def runtime_asset(profile: HardwareProfile | None = None) -> tuple[str, str]:
         asset = f"llama-{LLAMA_CPP_RELEASE_TAG}-bin-macos-{arch}.tar.gz"
     else:
         arch = "arm64" if machine in {"arm64", "aarch64"} else "x64"
-        if profile.acceleration == "cuda" and arch == "x64":
-            asset = f"llama-{LLAMA_CPP_RELEASE_TAG}-bin-ubuntu-cuda-12.4-x64.tar.gz"
+        # llama.cpp does not publish Linux CUDA builds; Vulkan is the GPU build that runs on NVIDIA.
+        if profile.has_gpu_acceleration and arch == "x64" and linux_vulkan_available():
+            asset = f"llama-{LLAMA_CPP_RELEASE_TAG}-bin-ubuntu-vulkan-x64.tar.gz"
         else:
             asset = f"llama-{LLAMA_CPP_RELEASE_TAG}-bin-ubuntu-{arch}.tar.gz"
 
     return asset, f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_CPP_RELEASE_TAG}/{asset}"
+
+
+def linux_vulkan_available() -> bool:
+    try:
+        ctypes.CDLL("libvulkan.so.1")
+        return True
+    except OSError:
+        return False
 
 
 def runtime_dependency_assets(asset_name: str) -> list[tuple[str, str]]:

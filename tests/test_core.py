@@ -3,12 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
 from ai_photo_sorter.ai_client import AIClient, normalize_search_intent
 from ai_photo_sorter.app import JobStore, create_app, scan_options_from_payload
-from ai_photo_sorter.config import AppSettings, LLAMA_BASE_URL, LLAMA_MODEL_FILE
+from ai_photo_sorter.config import AppSettings, LLAMA_BASE_URL, LLAMA_CPP_RELEASE_TAG, LLAMA_MODEL_FILE
 from ai_photo_sorter.database import ImageDatabase
 from ai_photo_sorter.image_tools import infer_folder_from_filename
 from ai_photo_sorter.organizer import (
@@ -123,6 +124,21 @@ class FilenameRulesTest(unittest.TestCase):
     def test_llama_runtime_selects_cpu_for_windows_without_cuda(self) -> None:
         asset, _ = runtime_asset(HardwareProfile(system="Windows", machine="amd64"))
         self.assertIn("win-cpu-x64", asset)
+
+    def test_llama_runtime_selects_existing_asset_for_nvidia_linux(self) -> None:
+        profile = HardwareProfile(
+            system="Linux",
+            machine="x86_64",
+            gpu_vendor="nvidia",
+            gpu_name="NVIDIA GeForce RTX",
+            acceleration="cuda",
+        )
+        with mock.patch("ai_photo_sorter.llama_runtime.linux_vulkan_available", return_value=True):
+            asset, _ = runtime_asset(profile)
+        self.assertEqual(asset, f"llama-{LLAMA_CPP_RELEASE_TAG}-bin-ubuntu-vulkan-x64.tar.gz")
+        with mock.patch("ai_photo_sorter.llama_runtime.linux_vulkan_available", return_value=False):
+            asset, _ = runtime_asset(profile)
+        self.assertEqual(asset, f"llama-{LLAMA_CPP_RELEASE_TAG}-bin-ubuntu-x64.tar.gz")
 
     def test_llama_runtime_selects_macos_arm64_for_apple_silicon(self) -> None:
         asset, _ = runtime_asset(
