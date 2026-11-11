@@ -212,7 +212,7 @@ function pollJob(jobId) {
       const percent = job.total ? (job.done / job.total) * 100 : 0;
       setProgress(percent, job.message || "Scanning");
       if (job.status === "done") {
-        state.reviewRows = job.results.map((row) => ({ ...row, approved: !row.needs_review }));
+        state.reviewRows = job.results.map((row) => ({ ...row, approved: !row.needs_review && !row.already_sorted }));
         renderReview(state.reviewRows);
         $("#applyChanges").disabled = state.reviewRows.length === 0;
         state.activeScanJobId = null;
@@ -286,7 +286,11 @@ function renderReview(rows) {
     row.innerHTML = `
       <td><input class="approve-input" type="checkbox" ${item.approved ? "checked" : ""}></td>
       <td><img class="thumb" src="${item.thumbnail_url}" alt="" loading="lazy"></td>
-      <td class="filename-cell">${escapeHtml(item.original_filename || "")}</td>
+      <td class="filename-cell">${escapeHtml(item.original_filename || "")}${
+        item.already_sorted
+          ? `<span class="sorted-badge" title="${escapeAttr(item.current_path || "")}">Already sorted</span>`
+          : ""
+      }</td>
       <td><input class="new-name-input" type="text" value="${escapeAttr(item.new_filename || "")}"></td>
       <td><input class="folder-input" type="text" value="${escapeAttr(item.suggested_folder || "")}"></td>
       <td><input class="caption-input" type="text" value="${escapeAttr(item.caption || "")}"></td>
@@ -310,6 +314,8 @@ function updateReviewStats(rows) {
   const needsReview = rows.filter((row) => row.needs_review).length;
   const parts = [`${rows.length} image${rows.length === 1 ? "" : "s"}`];
   if (needsReview) parts.push(`${needsReview} need${needsReview === 1 ? "s" : ""} review`);
+  const alreadySorted = rows.filter((row) => row.already_sorted).length;
+  if (alreadySorted) parts.push(`${alreadySorted} already sorted`);
   $("#reviewStats").textContent = parts.join(" · ");
 }
 
@@ -331,7 +337,7 @@ function approveHighConfidence() {
   const threshold = DEFAULT_CONFIDENCE_THRESHOLD;
   state.reviewRows = rowsFromReviewTable().map((row) => ({
     ...row,
-    approved: Number(row.confidence || 0) >= threshold && !row.needs_review,
+    approved: Number(row.confidence || 0) >= threshold && !row.needs_review && !row.already_sorted,
   }));
   renderReview(state.reviewRows);
 }
@@ -369,7 +375,15 @@ async function applyChanges() {
       mode: $("#fileMode").value,
     });
     if (!response.ok) throw new Error(response.error || "Apply failed.");
-    showToast(`Applied ${response.applied.length} image${response.applied.length === 1 ? "" : "s"}.`);
+    const applied = response.applied.length;
+    const failed = (response.skipped || []).filter(
+      (item) => item.reason !== "Not approved" && !item.reason.startsWith("Already sorted")
+    );
+    const alreadySorted = (response.skipped || []).filter((item) => item.reason.startsWith("Already sorted")).length;
+    let message = `Applied ${applied} image${applied === 1 ? "" : "s"}.`;
+    if (alreadySorted) message += ` ${alreadySorted} already sorted, left as is.`;
+    if (failed.length) message += ` ${failed.length} skipped: ${failed[0].reason}`;
+    showToast(message);
     refreshCategories();
   } catch (error) {
     showToast(error.message);
@@ -461,7 +475,12 @@ async function postJson(url, payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const data = await response.json();
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error(`Server error (${response.status}). Check the app's terminal output.`);
+  }
   if (!response.ok) throw new Error(data.error || data.message || "Request failed.");
   return data;
 }

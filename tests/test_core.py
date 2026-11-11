@@ -3,12 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
 from ai_photo_sorter.ai_client import AIClient, normalize_search_intent
-from ai_photo_sorter.app import JobStore, create_app, scan_options_from_payload
-from ai_photo_sorter.config import AppSettings, LLAMA_BASE_URL, LLAMA_MODEL_FILE
+from ai_photo_sorter.app import JobStore, create_app, resolve_folder, scan_options_from_payload
+from ai_photo_sorter.config import AppSettings, LLAMA_BASE_URL, LLAMA_CPP_RELEASE_TAG, LLAMA_MODEL_FILE
 from ai_photo_sorter.database import ImageDatabase
 from ai_photo_sorter.image_tools import infer_folder_from_filename
 from ai_photo_sorter.organizer import (
@@ -90,6 +91,32 @@ class FilenameRulesTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "output folder"):
                 scan_options_from_payload({"input_folder": tmp, "output_folder": ""})
 
+    def test_resolve_folder_maps_smb_uri_to_gvfs_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mount = Path(tmp) / "smb-share:server=nas.local,share=raid"
+            mount.mkdir()
+            with mock.patch("ai_photo_sorter.app.gvfs_root", return_value=Path(tmp)):
+                self.assertEqual(resolve_folder("smb://nas.local/raid/Media", "output"), mount / "Media")
+                self.assertEqual(resolve_folder("smb://nas.local/raid/My%20Photos", "output"), mount / "My Photos")
+                with self.assertRaisesRegex(ValueError, "not mounted"):
+                    resolve_folder("smb://other.local/share/x", "output")
+
+    def test_resolve_folder_rejects_relative_and_other_uris(self) -> None:
+        with self.assertRaisesRegex(ValueError, "full path"):
+            resolve_folder("smb:/nas.local/raid/Media", "output")
+        with self.assertRaisesRegex(ValueError, "full path"):
+            resolve_folder("Pictures/sorted", "output")
+        with self.assertRaisesRegex(ValueError, "local folder path"):
+            resolve_folder("sftp://host/dir", "output")
+        self.assertEqual(resolve_folder("file:///tmp/My%20Pics", "output"), Path("/tmp/My Pics"))
+
+    def test_apply_rejects_relative_output_folder(self) -> None:
+        response = create_app().test_client().post(
+            "/api/apply", json={"rows": [], "output_folder": "smb:/nas.local/raid/Media"}
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("full path", response.get_json()["error"])
+
     def test_job_store_drops_old_finished_jobs(self) -> None:
         store = JobStore()
         first = store.create()
@@ -123,6 +150,21 @@ class FilenameRulesTest(unittest.TestCase):
     def test_llama_runtime_selects_cpu_for_windows_without_cuda(self) -> None:
         asset, _ = runtime_asset(HardwareProfile(system="Windows", machine="amd64"))
         self.assertIn("win-cpu-x64", asset)
+
+    def test_llama_runtime_selects_existing_asset_for_nvidia_linux(self) -> None:
+        profile = HardwareProfile(
+            system="Linux",
+            machine="x86_64",
+            gpu_vendor="nvidia",
+            gpu_name="NVIDIA GeForce RTX",
+            acceleration="cuda",
+        )
+        with mock.patch("ai_photo_sorter.llama_runtime.linux_vulkan_available", return_value=True):
+            asset, _ = runtime_asset(profile)
+        self.assertEqual(asset, f"llama-{LLAMA_CPP_RELEASE_TAG}-bin-ubuntu-vulkan-x64.tar.gz")
+        with mock.patch("ai_photo_sorter.llama_runtime.linux_vulkan_available", return_value=False):
+            asset, _ = runtime_asset(profile)
+        self.assertEqual(asset, f"llama-{LLAMA_CPP_RELEASE_TAG}-bin-ubuntu-x64.tar.gz")
 
     def test_llama_runtime_selects_macos_arm64_for_apple_silicon(self) -> None:
         asset, _ = runtime_asset(
@@ -519,6 +561,95 @@ class OfflineScanTest(unittest.TestCase):
             self.assertTrue(destination.exists())
             self.assertTrue(source.exists())
             self.assertTrue(Path(result["undo_log"]).exists())
+
+    def _scanned_organizer(self, root: Path, names: list[str]) -> tuple[ImageOrganizer, list[dict], Path]:
+        input_dir = root / "input"
+        output_dir = root / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        for index, name in enumerate(names):
+            Image.new("RGB", (80, 60), (120, 90, index * 40)).save(input_dir / name)
+        organizer = ImageOrganizer(database=ImageDatabase(root / "library.db"), ai_client=OfflineAIClient())
+        rows = organizer.scan(
+            ScanOptions(
+                input_folder=input_dir,
+                output_folder=output_dir,
+                allow_filename_only_fallback=True,
+                settings=AppSettings(),
+            )
+        )
+        for row in rows:
+            row["approved"] = True
+        return organizer, rows, output_dir
+
+    def test_apply_copies_when_share_rejects_chmod(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            organizer, rows, output_dir = self._scanned_organizer(Path(tmp), ["Tamworth_townhall_01.jpg"])
+            unsupported = OSError(95, "Operation not supported")
+            with mock.patch("ai_photo_sorter.organizer.shutil.copystat", side_effect=unsupported):
+                result = organizer.apply_changes(rows, output_folder=output_dir, mode="copy")
+            self.assertEqual(len(result["applied"]), 1)
+            self.assertTrue(Path(result["applied"][0]["destination"]).exists())
+
+    def test_apply_skips_failed_file_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            organizer, rows, output_dir = self._scanned_organizer(
+                Path(tmp), ["Tamworth_townhall_01.jpg", "Tamworth_bridge_01.jpg"]
+            )
+            real_copyfile = __import__("shutil").copyfile
+            calls = []
+
+            def flaky_copyfile(src, dst, *args, **kwargs):
+                calls.append(dst)
+                if len(calls) == 1:
+                    Path(dst).write_bytes(b"partial")
+                    raise OSError(5, "Input/output error")
+                return real_copyfile(src, dst, *args, **kwargs)
+
+            with mock.patch("ai_photo_sorter.organizer.shutil.copyfile", side_effect=flaky_copyfile):
+                result = organizer.apply_changes(rows, output_folder=output_dir, mode="copy")
+            self.assertEqual(len(result["applied"]), 1)
+            failed = [item for item in result["skipped"] if item["reason"] != "Not approved"]
+            self.assertEqual(len(failed), 1)
+            self.assertIn("Input/output error", failed[0]["reason"])
+            self.assertFalse(Path(calls[0]).exists())
+
+    def test_rescan_remembers_sorted_photos_and_apply_skips_them(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            organizer, rows, output_dir = self._scanned_organizer(root, ["Tamworth_townhall_01.jpg"])
+            first = organizer.apply_changes(rows, output_folder=output_dir, mode="copy")
+            destination = Path(first["applied"][0]["destination"])
+
+            options = ScanOptions(
+                input_folder=root / "input",
+                output_folder=output_dir,
+                allow_filename_only_fallback=True,
+                settings=AppSettings(),
+            )
+            rescanned = organizer.scan(options)
+            self.assertTrue(rescanned[0]["already_sorted"])
+            self.assertEqual(rescanned[0]["current_path"], str(destination))
+            self.assertEqual(rescanned[0]["new_filename"], destination.name)
+
+            rescanned[0]["approved"] = True
+            second = organizer.apply_changes(rescanned, output_folder=output_dir, mode="copy")
+            self.assertEqual(second["applied"], [])
+            self.assertTrue(second["skipped"][0]["reason"].startswith("Already sorted"))
+            self.assertEqual(len(list(destination.parent.iterdir())), 1)
+
+            # If the sorted copy is deleted, the photo becomes sortable again.
+            destination.unlink()
+            again = organizer.scan(options)
+            self.assertFalse(again[0]["already_sorted"])
+            self.assertIsNone(again[0]["current_path"])
+
+    def test_api_errors_are_returned_as_json(self) -> None:
+        app = create_app()
+        with mock.patch("ai_photo_sorter.app.ImageOrganizer.apply_changes", side_effect=RuntimeError("boom")):
+            response = app.test_client().post("/api/apply", json={"rows": [], "output_folder": "/tmp/x"})
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json(), {"ok": False, "error": "boom"})
 
 
 if __name__ == "__main__":

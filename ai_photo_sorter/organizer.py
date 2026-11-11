@@ -125,6 +125,11 @@ class ImageOrganizer:
                     skipped.append({"id": image_id, "reason": "Image is no longer in the database"})
                     continue
 
+                sorted_path = sorted_destination(image)
+                if sorted_path:
+                    skipped.append({"id": image_id, "reason": f"Already sorted to {sorted_path}"})
+                    continue
+
                 source = Path(image["original_path"])
                 if not source.exists():
                     skipped.append({"id": image_id, "reason": "Original file is missing"})
@@ -140,18 +145,29 @@ class ImageOrganizer:
                     or "Other"
                 )
                 destination_dir = output_folder / folder
-                destination_dir.mkdir(parents=True, exist_ok=True)
                 filename = sanitize_filename(
                     review_update.get("new_filename") or image.get("new_filename") or source.name,
                     original_extension=source.suffix,
                 )
-                destination = unique_destination(destination_dir, filename, reserved)
-                if mode == "move":
-                    shutil.move(str(source), str(destination))
-                    action = "move"
-                else:
-                    shutil.copy2(source, destination)
-                    action = "copy"
+                destination = None
+                try:
+                    destination_dir.mkdir(parents=True, exist_ok=True)
+                    destination = unique_destination(destination_dir, filename, reserved)
+                    if mode == "move":
+                        shutil.move(str(source), str(destination), copy_function=copy_file)
+                        action = "move"
+                    else:
+                        copy_file(source, destination)
+                        action = "copy"
+                except OSError as exc:
+                    # Never leave a half-written copy behind; the original stays where it was.
+                    if destination is not None and source.exists():
+                        try:
+                            destination.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    skipped.append({"id": image_id, "reason": f"Could not write file: {exc.strerror or exc}"})
+                    continue
 
                 undo_record = {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -227,10 +243,7 @@ class ImageOrganizer:
             **ai_result,
             "suggested_folder": suggested_folder,
         }
-        image_id = self.database.upsert_image(db_payload)
-        row = self.database.get_image(image_id) or db_payload
-        row["id"] = image_id
-        return row
+        return self._save_scan_row(image_path, db_payload)
 
     def _error_result(
         self,
@@ -278,10 +291,37 @@ class ImageOrganizer:
             **ai_result,
             "suggested_folder": folder,
         }
+        return self._save_scan_row(image_path, db_payload)
+
+
+    def _save_scan_row(self, image_path: Path, db_payload: dict[str, Any]) -> dict[str, Any]:
+        previous = self.database.get_by_original_path(str(image_path))
+        sorted_path = sorted_destination(previous)
+        if sorted_path:
+            # Already copied/moved earlier: show where it went instead of a new suggestion.
+            db_payload["new_filename"] = sorted_path.name
         image_id = self.database.upsert_image(db_payload)
+        if previous and previous.get("current_path") and not sorted_path:
+            # The earlier copy is gone, so the photo can be sorted again.
+            self.database.clear_current_path(image_id)
         row = self.database.get_image(image_id) or db_payload
         row["id"] = image_id
+        row["already_sorted"] = bool(sorted_path)
         return row
+
+
+def sorted_destination(image: dict[str, Any] | None) -> Path | None:
+    """Return where a photo was already sorted to, if that copy still exists."""
+    if not image:
+        return None
+    current = image.get("current_path")
+    if not current or current == image.get("original_path"):
+        return None
+    path = Path(current)
+    try:
+        return path if path.is_file() else None
+    except OSError:
+        return None
 
 
 def exclude_output_folder(files: list[Path], input_folder: Path, output_folder: Path) -> list[Path]:
@@ -411,6 +451,20 @@ def sanitize_filename(filename: str, *, original_extension: str) -> str:
     if not extension.startswith("."):
         extension = f".{extension}"
     return f"{stem}{extension}"
+
+
+def copy_file(source: str | Path, destination: str | Path) -> str:
+    """Copy contents, then metadata on a best-effort basis.
+
+    Network mounts such as GVFS SMB shares reject chmod/utime, which makes
+    shutil.copy2 raise after the data has already been written.
+    """
+    shutil.copyfile(source, destination)
+    try:
+        shutil.copystat(source, destination)
+    except OSError:
+        pass
+    return str(destination)
 
 
 def unique_destination(directory: Path, filename: str, reserved: set[str] | None = None) -> Path:
