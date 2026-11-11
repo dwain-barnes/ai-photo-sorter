@@ -687,6 +687,18 @@ h2 {
   font-size: 11px;
 }
 
+.sorted-badge {
+  display: block;
+  width: fit-content;
+  margin-top: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--green-dim);
+  color: var(--green);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .link-button {
   justify-self: start;
   color: var(--amber);

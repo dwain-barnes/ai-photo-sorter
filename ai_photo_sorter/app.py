@@ -10,6 +10,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from flask import Flask, jsonify, render_template, request, send_file
 
@@ -175,7 +176,10 @@ def create_app() -> Flask:
         raw_output = str(payload.get("output_folder") or "").strip()
         if not raw_output:
             return jsonify({"ok": False, "error": "Choose an output folder first."}), 400
-        output_folder = Path(raw_output).expanduser()
+        try:
+            output_folder = resolve_folder(raw_output, "output")
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
         mode = "move" if payload.get("mode") == "move" else "copy"
         rows = payload.get("rows") or []
         result = organizer.apply_changes(rows, output_folder=output_folder, mode=mode)
@@ -215,6 +219,17 @@ def create_app() -> Flask:
     def hardware():
         profile = detect_hardware()
         return jsonify({"ok": True, "hardware": profile.__dict__})
+
+    @app.errorhandler(Exception)
+    def json_error(exc: Exception):
+        from werkzeug.exceptions import HTTPException
+
+        if isinstance(exc, HTTPException):
+            if not request.path.startswith("/api/"):
+                return exc
+            return jsonify({"ok": False, "error": exc.description}), exc.code
+        app.logger.exception("Unhandled error on %s", request.path)
+        return jsonify({"ok": False, "error": str(exc) or exc.__class__.__name__}), 500
 
     @app.post("/api/open-folder")
     def open_folder():
@@ -289,6 +304,42 @@ def run_local_ai_setup_job(job_id: str) -> None:
         jobs.update(job_id, status="error", done=100, total=100, error=str(exc), message="Local AI setup failed")
 
 
+def gvfs_root() -> Path:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return Path(runtime_dir) / "gvfs"
+
+
+def resolve_folder(raw: str, label: str) -> Path:
+    """Turn a user-typed folder into an absolute local path.
+
+    File managers on Linux copy network locations as URIs such as
+    smb://host/share/dir. Path() would treat that as a relative folder named
+    "smb:", silently writing files next to the app, so map SMB URIs to their
+    GVFS mount and reject anything else that is not an absolute path.
+    """
+    text = raw.strip()
+    if text.lower().startswith("file://"):
+        text = unquote(urlsplit(text).path)
+    elif "://" in text:
+        parts = urlsplit(text)
+        if parts.scheme.lower() == "smb" and parts.hostname:
+            segments = [unquote(seg) for seg in parts.path.split("/") if seg]
+            if segments:
+                share = segments[0]
+                mount = gvfs_root() / f"smb-share:server={parts.hostname},share={share}"
+                if mount.is_dir():
+                    return mount.joinpath(*segments[1:])
+                raise ValueError(
+                    f"The network share {text} is not mounted. Open it in your file manager first, "
+                    f"or use a local folder path for the {label} folder."
+                )
+        raise ValueError(f"The {label} folder must be a local folder path, not a {parts.scheme}:// address.")
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"The {label} folder must be a full path, for example /home/you/Pictures.")
+    return path
+
+
 def scan_options_from_payload(payload: dict[str, Any]) -> ScanOptions:
     raw_input = str(payload.get("input_folder") or "").strip()
     raw_output = str(payload.get("output_folder") or "").strip()
@@ -296,8 +347,8 @@ def scan_options_from_payload(payload: dict[str, Any]) -> ScanOptions:
         raise ValueError("Choose a valid input folder.")
     if not raw_output:
         raise ValueError("Choose a valid output folder.")
-    input_folder = Path(raw_input).expanduser()
-    output_folder = Path(raw_output).expanduser()
+    input_folder = resolve_folder(raw_input, "input")
+    output_folder = resolve_folder(raw_output, "output")
     if not input_folder.exists() or not input_folder.is_dir():
         raise ValueError("Choose a valid input folder.")
     return ScanOptions(
@@ -337,6 +388,7 @@ def row_for_api(row: dict[str, Any]) -> dict[str, Any]:
         "visible_text": row.get("visible_text") or "",
         "confidence": row.get("confidence") or 0,
         "needs_review": bool(row.get("needs_review")),
+        "already_sorted": bool(row.get("already_sorted")),
         "thumbnail_url": f"/thumbnail/{row.get('id')}",
         "last_error": row.get("last_error") or "",
     }

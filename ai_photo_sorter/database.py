@@ -153,7 +153,11 @@ class ImageDatabase:
             ).fetchone()
             if existing:
                 image_id = int(existing["id"])
-                assignments = ", ".join(f"{column} = ?" for column in IMAGE_COLUMNS)
+                # A rescan must not forget where the photo was already sorted to.
+                assignments = ", ".join(
+                    "current_path = COALESCE(?, current_path)" if column == "current_path" else f"{column} = ?"
+                    for column in IMAGE_COLUMNS
+                )
                 values = [payload.get(column) for column in IMAGE_COLUMNS]
                 connection.execute(
                     f"UPDATE images SET {assignments} WHERE id = ?",
@@ -180,6 +184,10 @@ class ImageDatabase:
             row = connection.execute("SELECT * FROM images WHERE id = ?", (image_id,)).fetchone()
             if row:
                 self._replace_fts_row(connection, image_id, dict(row))
+
+    def clear_current_path(self, image_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute("UPDATE images SET current_path = NULL WHERE id = ?", (image_id,))
 
     def get_image(self, image_id: int) -> dict[str, Any] | None:
         with self.connect() as connection:
