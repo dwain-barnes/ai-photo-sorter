@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -519,6 +521,179 @@ class OfflineScanTest(unittest.TestCase):
             self.assertTrue(destination.exists())
             self.assertTrue(source.exists())
             self.assertTrue(Path(result["undo_log"]).exists())
+
+
+class DuplicateDetectionTest(unittest.TestCase):
+    def _organizer(self, root: Path) -> ImageOrganizer:
+        return ImageOrganizer(
+            database=ImageDatabase(root / "library.db"),
+            ai_client=OfflineAIClient(),
+        )
+
+    def _scan(self, organizer: ImageOrganizer, input_dir: Path, output_dir: Path, **kwargs: object):
+        return organizer.scan(
+            ScanOptions(
+                input_folder=input_dir,
+                output_folder=output_dir,
+                allow_filename_only_fallback=True,
+                settings=AppSettings(),
+                **kwargs,
+            )
+        )
+
+    def _folder_with_copies(self, root: Path) -> tuple[Path, Path]:
+        input_dir = root / "input"
+        output_dir = root / "output"
+        input_dir.mkdir()
+        Image.new("RGB", (80, 60), (120, 90, 50)).save(input_dir / "a_beach.jpg")
+        shutil.copy2(input_dir / "a_beach.jpg", input_dir / "b_beach_copy.jpg")
+        Image.new("RGB", (80, 60), (10, 200, 50)).save(input_dir / "c_forest.jpg")
+        return input_dir, output_dir
+
+    def test_scan_flags_identical_files_in_same_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir, output_dir = self._folder_with_copies(root)
+            organizer = self._organizer(root)
+            rows = {row["original_filename"]: row for row in self._scan(organizer, input_dir, output_dir)}
+
+            original = rows["a_beach.jpg"]
+            copy = rows["b_beach_copy.jpg"]
+            self.assertIsNone(original["duplicate_of"])
+            self.assertIsNone(rows["c_forest.jpg"]["duplicate_of"])
+            self.assertEqual(copy["duplicate_of"], original["id"])
+            self.assertEqual(copy["duplicate_kind"], "exact")
+            self.assertEqual(copy["duplicate_of_filename"], "a_beach.jpg")
+            self.assertEqual(organizer.database.get_image(copy["id"])["duplicate_of"], original["id"])
+
+    def test_rescan_keeps_same_original_and_clears_stale_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir, output_dir = self._folder_with_copies(root)
+            organizer = self._organizer(root)
+            self._scan(organizer, input_dir, output_dir)
+            rows = {row["original_filename"]: row for row in self._scan(organizer, input_dir, output_dir)}
+            self.assertIsNone(rows["a_beach.jpg"]["duplicate_of"])
+            self.assertEqual(rows["b_beach_copy.jpg"]["duplicate_of"], rows["a_beach.jpg"]["id"])
+
+            (input_dir / "a_beach.jpg").unlink()
+            rows = self._scan(organizer, input_dir, output_dir)
+            copy = next(row for row in rows if row["original_filename"] == "b_beach_copy.jpg")
+            self.assertIsNone(copy["duplicate_of"])
+            self.assertIsNone(organizer.database.get_image(copy["id"])["duplicate_of"])
+
+    def test_scan_flags_file_already_in_library_from_other_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir, output_dir = self._folder_with_copies(root)
+            organizer = self._organizer(root)
+            first = {row["original_filename"]: row for row in self._scan(organizer, input_dir, output_dir)}
+
+            other_dir = root / "other"
+            other_dir.mkdir()
+            shutil.copy2(input_dir / "a_beach.jpg", other_dir / "beach_again.jpg")
+            rows = self._scan(organizer, other_dir, output_dir)
+            self.assertEqual(rows[0]["duplicate_of"], first["a_beach.jpg"]["id"])
+
+    def test_apply_skips_duplicates_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir, output_dir = self._folder_with_copies(root)
+            organizer = self._organizer(root)
+            rows = self._scan(organizer, input_dir, output_dir)
+            for row in rows:
+                row["approved"] = True
+            copy = next(row for row in rows if row["duplicate_of"])
+
+            result = organizer.apply_changes(rows, output_folder=output_dir, mode="copy")
+
+            self.assertEqual(len(result["applied"]), 2)
+            self.assertEqual(
+                result["skipped"],
+                [{"id": copy["id"], "reason": "Duplicate of a_beach.jpg", "duplicate_of": copy["duplicate_of"]}],
+            )
+            copied = sorted(path.name for path in output_dir.rglob("*.jpg"))
+            self.assertEqual(len(copied), 2)
+
+    def test_apply_skips_duplicate_flagged_in_database_even_if_row_omits_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir, output_dir = self._folder_with_copies(root)
+            organizer = self._organizer(root)
+            rows = self._scan(organizer, input_dir, output_dir)
+            copy = next(row for row in rows if row["duplicate_of"])
+            stripped = {key: value for key, value in copy.items() if not key.startswith("duplicate_")}
+            stripped["approved"] = True
+
+            result = organizer.apply_changes([stripped], output_folder=output_dir, mode="copy")
+
+            self.assertEqual(result["applied"], [])
+            self.assertTrue(result["skipped"][0]["reason"].startswith("Duplicate of"))
+
+    def test_apply_can_keep_duplicates_when_option_is_off(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir, output_dir = self._folder_with_copies(root)
+            organizer = self._organizer(root)
+            rows = self._scan(organizer, input_dir, output_dir, skip_duplicates=False)
+            self.assertTrue(all(row["skip_duplicates"] is False for row in rows))
+            for row in rows:
+                row["approved"] = True
+
+            result = organizer.apply_changes(
+                rows, output_folder=output_dir, mode="copy", skip_duplicates=False
+            )
+            self.assertEqual(len(result["applied"]), 3)
+            self.assertEqual(result["skipped"], [])
+
+    def test_skip_duplicates_scan_option_defaults_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = {"input_folder": tmp, "output_folder": tmp}
+            self.assertTrue(scan_options_from_payload(payload).skip_duplicates)
+            payload["skip_duplicates"] = False
+            self.assertFalse(scan_options_from_payload(payload).skip_duplicates)
+
+    def test_database_migration_adds_duplicate_columns_to_old_library(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "image_library.db"
+            connection = sqlite3.connect(path)
+            connection.execute(
+                """
+                CREATE TABLE images (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    original_path TEXT NOT NULL, current_path TEXT, original_filename TEXT,
+                    new_filename TEXT, suggested_folder TEXT, file_hash TEXT, perceptual_hash TEXT,
+                    file_size INTEGER, width INTEGER, height INTEGER, exif_date TEXT, scan_date TEXT,
+                    category TEXT, subcategory TEXT, caption TEXT, tags_json TEXT, objects_json TEXT,
+                    visible_text TEXT, model_name TEXT, confidence REAL, needs_review INTEGER,
+                    thumbnail_path TEXT, last_error TEXT
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO images (original_path, original_filename, file_hash) VALUES (?, ?, ?)",
+                ("/old/photo.jpg", "photo.jpg", "abc"),
+            )
+            connection.commit()
+            connection.close()
+
+            database = ImageDatabase(path)
+            ImageDatabase(path)  # running the migration twice is harmless
+            old = database.get_by_original_path("/old/photo.jpg")
+            self.assertIn("duplicate_of", old)
+            self.assertIsNone(old["duplicate_of"])
+            image_id = database.upsert_image(
+                {"original_path": "/new/photo.jpg", "file_hash": "abc", "duplicate_of": old["id"], "duplicate_kind": "exact"}
+            )
+            self.assertEqual(database.get_image(image_id)["duplicate_of"], old["id"])
+
+    def test_review_table_has_duplicate_badge_and_skip_toggle(self) -> None:
+        html = create_app().test_client().get("/").get_data(as_text=True)
+        self.assertIn('id="skipDuplicates"', html)
+        self.assertIn("checked", html.split('id="skipDuplicates"')[1].split(">")[0])
+        script = (Path(__file__).resolve().parents[1] / "ai_photo_sorter" / "static" / "app.js").read_text()
+        self.assertIn("dup-badge", script)
+        self.assertIn("skip_duplicates", script)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,10 @@ from .image_tools import (
 
 ProgressCallback = Callable[[int, int, str], None]
 
+# How a duplicate was matched. Only exact (byte-identical, same SHA-256) matches
+# exist today; a perceptual-hash matcher can add its own kind later.
+DUPLICATE_KIND_EXACT = "exact"
+
 
 @dataclass
 class ScanOptions:
@@ -38,6 +42,7 @@ class ScanOptions:
     custom_categories: str = ""
     batch_limit: int = 0
     allow_filename_only_fallback: bool = False
+    skip_duplicates: bool = True
     settings: AppSettings | None = None
 
     @property
@@ -72,6 +77,7 @@ class ImageOrganizer:
         total = len(files)
         results: list[dict[str, Any]] = []
         reserved_destinations: set[str] = set()
+        duplicates = DuplicateTracker(self.database, scanned_paths=[str(path) for path in files])
         connection = client.test_connection()
         ai_available = bool(connection.get("ok"))
         if not ai_available and not options.allow_filename_only_fallback:
@@ -95,6 +101,8 @@ class ImageOrganizer:
             except Exception as exc:
                 fallback = self._error_result(image_path, str(exc), options, reserved_destinations)
                 results.append(fallback)
+            duplicates.mark(results[-1])
+            results[-1]["skip_duplicates"] = options.skip_duplicates
             if progress:
                 progress(index, total, f"Scanned {image_path.name}")
 
@@ -106,6 +114,7 @@ class ImageOrganizer:
         *,
         output_folder: Path,
         mode: str = "copy",
+        skip_duplicates: bool = True,
     ) -> dict[str, Any]:
         output_folder.mkdir(parents=True, exist_ok=True)
         undo_path = output_folder / f"undo_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
@@ -115,6 +124,9 @@ class ImageOrganizer:
 
         with undo_path.open("a", encoding="utf-8") as undo_file:
             for row in rows:
+                if skip_duplicates and row.get("duplicate_of"):
+                    skipped.append(duplicate_skip(row.get("id"), row))
+                    continue
                 if not row.get("approved", True):
                     skipped.append({"id": row.get("id"), "reason": "Not approved"})
                     continue
@@ -123,6 +135,9 @@ class ImageOrganizer:
                 image = self.database.get_image(image_id)
                 if not image:
                     skipped.append({"id": image_id, "reason": "Image is no longer in the database"})
+                    continue
+                if skip_duplicates and image.get("duplicate_of"):
+                    skipped.append(duplicate_skip(image_id, image))
                     continue
 
                 source = Path(image["original_path"])
@@ -282,6 +297,59 @@ class ImageOrganizer:
         row = self.database.get_image(image_id) or db_payload
         row["id"] = image_id
         return row
+
+
+class DuplicateTracker:
+    """Flags scan results that are exact copies of an earlier image.
+
+    The first copy met in a scan is the original, unless the same file already
+    sits in the library from an earlier scan (and still exists on disk), in
+    which case that library image is the original.
+    """
+
+    def __init__(self, database: ImageDatabase, scanned_paths: list[str]) -> None:
+        self.database = database
+        self.scanned_paths = set(scanned_paths)
+        self.originals: dict[str, dict[str, Any]] = {}
+
+    def mark(self, row: dict[str, Any]) -> None:
+        file_hash = row.get("file_hash")
+        if not file_hash or row.get("id") is None:
+            return
+        original = self.originals.get(file_hash)
+        if original is None:
+            original = self.database.find_duplicate_original(
+                file_hash, exclude_paths=self.scanned_paths
+            )
+        if original is None or int(original["id"]) == int(row["id"]):
+            self.originals.setdefault(file_hash, row)
+            set_duplicate_fields(row, None)
+            return
+        self.originals.setdefault(file_hash, original)
+        set_duplicate_fields(row, original)
+        self.database.set_duplicate(int(row["id"]), int(original["id"]), DUPLICATE_KIND_EXACT)
+
+
+def set_duplicate_fields(row: dict[str, Any], original: dict[str, Any] | None) -> None:
+    if original is None:
+        row["duplicate_of"] = None
+        row["duplicate_kind"] = None
+        row["duplicate_of_filename"] = ""
+        row["duplicate_of_path"] = ""
+        return
+    row["duplicate_of"] = int(original["id"])
+    row["duplicate_kind"] = DUPLICATE_KIND_EXACT
+    row["duplicate_of_filename"] = original.get("original_filename") or ""
+    row["duplicate_of_path"] = original.get("current_path") or original.get("original_path") or ""
+
+
+def duplicate_skip(image_id: Any, row: dict[str, Any]) -> dict[str, Any]:
+    original_name = row.get("duplicate_of_filename") or f"image #{row.get('duplicate_of')}"
+    return {
+        "id": image_id,
+        "reason": f"Duplicate of {original_name}",
+        "duplicate_of": row.get("duplicate_of"),
+    }
 
 
 def exclude_output_folder(files: list[Path], input_folder: Path, output_folder: Path) -> list[Path]:

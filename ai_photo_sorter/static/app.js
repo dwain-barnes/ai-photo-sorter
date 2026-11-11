@@ -47,6 +47,13 @@ function bindControls() {
     });
   });
 
+  $("#skipDuplicates").addEventListener("change", () => {
+    if (!state.reviewRows.length) return;
+    state.reviewRows = rowsFromReviewTable().map((row) => (
+      row.duplicate_of ? { ...row, approved: !row.needs_review && !skipsAsDuplicate(row) } : row
+    ));
+    renderReview(state.reviewRows);
+  });
   $("#scanImages").addEventListener("click", startScan);
   $("#cancelScan").addEventListener("click", cancelScan);
   $("#approveHigh").addEventListener("click", approveHighConfidence);
@@ -72,6 +79,7 @@ function collectSettings() {
     confidence_threshold: DEFAULT_CONFIDENCE_THRESHOLD,
     batch_limit: 0,
     mode: $("#fileMode").value,
+    skip_duplicates: $("#skipDuplicates").checked,
   };
 }
 
@@ -212,7 +220,7 @@ function pollJob(jobId) {
       const percent = job.total ? (job.done / job.total) * 100 : 0;
       setProgress(percent, job.message || "Scanning");
       if (job.status === "done") {
-        state.reviewRows = job.results.map((row) => ({ ...row, approved: !row.needs_review }));
+        state.reviewRows = job.results.map((row) => ({ ...row, approved: !row.needs_review && !skipsAsDuplicate(row) }));
         renderReview(state.reviewRows);
         $("#applyChanges").disabled = state.reviewRows.length === 0;
         state.activeScanJobId = null;
@@ -280,13 +288,13 @@ function renderReview(rows) {
     const percent = Math.round(Number(item.confidence || 0) * 100);
     const low = item.needs_review || Number(item.confidence || 0) < DEFAULT_CONFIDENCE_THRESHOLD;
     const row = document.createElement("tr");
-    row.className = "review-row";
+    row.className = item.duplicate_of ? "review-row duplicate" : "review-row";
     row.dataset.index = String(index);
     row.style.animationDelay = `${Math.min(index * 25, 500)}ms`;
     row.innerHTML = `
       <td><input class="approve-input" type="checkbox" ${item.approved ? "checked" : ""}></td>
       <td><img class="thumb" src="${item.thumbnail_url}" alt="" loading="lazy"></td>
-      <td class="filename-cell">${escapeHtml(item.original_filename || "")}</td>
+      <td class="filename-cell">${escapeHtml(item.original_filename || "")}${duplicateBadge(item)}</td>
       <td><input class="new-name-input" type="text" value="${escapeAttr(item.new_filename || "")}"></td>
       <td><input class="folder-input" type="text" value="${escapeAttr(item.suggested_folder || "")}"></td>
       <td><input class="caption-input" type="text" value="${escapeAttr(item.caption || "")}"></td>
@@ -310,7 +318,19 @@ function updateReviewStats(rows) {
   const needsReview = rows.filter((row) => row.needs_review).length;
   const parts = [`${rows.length} image${rows.length === 1 ? "" : "s"}`];
   if (needsReview) parts.push(`${needsReview} need${needsReview === 1 ? "s" : ""} review`);
+  const duplicates = rows.filter((row) => row.duplicate_of).length;
+  if (duplicates) parts.push(`${duplicates} duplicate${duplicates === 1 ? "" : "s"}`);
   $("#reviewStats").textContent = parts.join(" · ");
+}
+
+function skipsAsDuplicate(row) {
+  return Boolean(row.duplicate_of) && $("#skipDuplicates").checked;
+}
+
+function duplicateBadge(item) {
+  if (!item.duplicate_of) return "";
+  const original = item.duplicate_of_path || item.duplicate_of_filename || `image #${item.duplicate_of}`;
+  return `<span class="dup-badge" title="${escapeAttr(`Same file as ${original}`)}">Duplicate of ${escapeHtml(item.duplicate_of_filename || `#${item.duplicate_of}`)}</span>`;
 }
 
 function rowsFromReviewTable() {
@@ -331,7 +351,7 @@ function approveHighConfidence() {
   const threshold = DEFAULT_CONFIDENCE_THRESHOLD;
   state.reviewRows = rowsFromReviewTable().map((row) => ({
     ...row,
-    approved: Number(row.confidence || 0) >= threshold && !row.needs_review,
+    approved: Number(row.confidence || 0) >= threshold && !row.needs_review && !skipsAsDuplicate(row),
   }));
   renderReview(state.reviewRows);
 }
@@ -367,9 +387,13 @@ async function applyChanges() {
       rows,
       output_folder: $("#outputFolder").value.trim(),
       mode: $("#fileMode").value,
+      skip_duplicates: $("#skipDuplicates").checked,
     });
     if (!response.ok) throw new Error(response.error || "Apply failed.");
-    showToast(`Applied ${response.applied.length} image${response.applied.length === 1 ? "" : "s"}.`);
+    const skippedDuplicates = (response.skipped || []).filter((item) => item.duplicate_of).length;
+    let message = `Applied ${response.applied.length} image${response.applied.length === 1 ? "" : "s"}.`;
+    if (skippedDuplicates) message += ` Skipped ${skippedDuplicates} duplicate${skippedDuplicates === 1 ? "" : "s"}.`;
+    showToast(message);
     refreshCategories();
   } catch (error) {
     showToast(error.message);

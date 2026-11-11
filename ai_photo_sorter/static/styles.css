@@ -513,6 +513,23 @@ h2 {
   color: var(--muted);
 }
 
+.dup-badge {
+  display: block;
+  width: fit-content;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--red-dim);
+  color: var(--red);
+  font-family: inherit;
+  font-size: 11px;
+  white-space: normal;
+}
+
+.review-row.duplicate .thumb {
+  opacity: 0.55;
+}
+
 .confidence {
   display: grid;
   gap: 6px;
@@ -608,6 +625,18 @@ h2 {
 
 .inline-check input {
   accent-color: var(--amber);
+}
+
+.field .inline-check {
+  color: var(--text);
+}
+
+.field .inline-check input {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
 }
 
 .interpreted {
